@@ -1,5 +1,5 @@
 """
-api.py — FastAPI REST API (Randomized Edition)
+api.py — FastAPI REST API (Local Development Edition)
 """
 import uuid
 import os
@@ -29,9 +29,14 @@ from councelling_module import Counselor, UniversityRecommender, populate_dummy_
 
 app = FastAPI(title="Admission Architect API")
 
+# CORS: local dev origins plus FRONTEND_ORIGIN (the Vercel URL) in production.
+allowed_origins = ["http://localhost:3000", "http://localhost:3001"]
+if os.getenv("FRONTEND_ORIGIN"):
+    allowed_origins.append(os.getenv("FRONTEND_ORIGIN"))
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # ✅ Changed from localhost to allow all (you can restrict this later to your Vercel domain!)
+    allow_origins=allowed_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -45,20 +50,25 @@ def make_token(user_id: str) -> str:
     payload = {"user_id": user_id, "exp": datetime.utcnow() + timedelta(days=JWT_EXPIRE_DAYS)}
     return jwt.encode(payload, JWT_SECRET, algorithm="HS256")
 
-def verify_token(token: str) -> Optional[str]:
-    try:
-        payload = jwt.decode(token, JWT_SECRET, algorithms=["HS256"])
-        return payload.get("user_id")
-    except Exception:
-        return None
-
 @app.on_event("startup")
 async def startup():
     await push_schema()
-    populate_dummy_data()
-    print("✅ API ready.")
+    # populate_dummy_data() wipes and reloads the CSV, so only run it when the
+    # table is empty. Render cold-starts would otherwise re-seed on every boot.
+    session = get_sync_session()
+    try:
+        needs_seed = session.query(University).count() == 0
+    finally:
+        session.close()
 
-# --- AUTH ---
+    if needs_seed or os.getenv("FORCE_RESEED") == "true":
+        populate_dummy_data()
+    else:
+        print("✅ Universities already seeded — skipping CSV reload.")
+
+    print("✅ API startup complete.")
+
+# --- AUTH ROUTES ---
 class SignupRequest(BaseModel):
     username: str
     email: str
@@ -120,8 +130,6 @@ def verify_email(token: str):
         user.verification_token = None
         session.commit()
         return {"success": True, "email": user.email}
-    except HTTPException:
-        raise
     finally:
         session.close()
         
@@ -139,12 +147,10 @@ def login(data: LoginRequest):
 
         token = make_token(str(user.id))
         return {"token": token, "user_id": str(user.id), "username": user.username, "email": user.email}
-    except HTTPException:
-        raise
     finally:
         session.close()
 
-# --- PROFILE & UNI ---
+# --- PROFILE & UNIVERSITY ROUTES ---
 class ProfileRequest(BaseModel):
     user_id: str
     cgpa: float
@@ -197,14 +203,23 @@ def recommend_universities(data: RecommendRequest):
         profile = session.query(StudentProfile).filter_by(user_id=data.user_id).first()
         if not profile:
             raise HTTPException(status_code=404, detail="Profile not found. Please complete your profile first.")
+        
         recommender = UniversityRecommender()
-        recommender.load_and_train()
-        results = recommender.recommend(profile)
-        return {"recommendations": results}
+        
+        # 1. Get the bulletproof local database matches (from CSV)
+        db_results = recommender.recommend(profile)
+        
+        # 2. Get the top 5 dynamic AI matches using your existing groq_client
+        ai_results = recommender.recommend_from_ai(profile, groq_client)
+
+        # 3. Return both sets to the frontend!
+        return {
+            "database_matches": db_results,
+            "ai_matches": ai_results
+        }
     finally:
         session.close()
-
-# --- GRE ---
+# --- GRE ROUTES ---
 class GREQuestionRequest(BaseModel):
     user_id: str
     topic: str
@@ -223,10 +238,7 @@ class GREEssayRequest(BaseModel):
 
 @app.post("/api/gre/question")
 def gre_question(data: GREQuestionRequest):
-    gre = GREPrep(data.user_id)
-    result = gre.generate_question(data.topic)
-    if "error" in result: raise HTTPException(status_code=500, detail=result["error"])
-    return result
+    return GREPrep(data.user_id).generate_question(data.topic)
 
 @app.post("/api/gre/submit-answer")
 def gre_submit(data: GREAnswerRequest):
@@ -242,7 +254,7 @@ def gre_essay(data: GREEssayRequest):
     gre.save_result("Analytical Writing", result.get("score", 0), result.get("feedback", ""))
     return result
 
-# --- IELTS ---
+# --- IELTS ROUTES ---
 class IELTSRequest(BaseModel):
     user_id: str
 
@@ -253,7 +265,7 @@ class IELTSWritingRequest(BaseModel):
 class IELTSSpeakingRequest(BaseModel):
     user_id: str
     response_text: str
-    topic: str = "" # ✅ Added topic field to know what they are answering!
+    topic: str = ""
 
 class IELTSScoreRequest(BaseModel):
     user_id: str
@@ -267,53 +279,34 @@ def ielts_reading(data: IELTSRequest):
 
 @app.post("/api/ielts/listening")
 def ielts_listening(data: IELTSRequest):
-    # ✅ Randomized listening topics!
-    topics = ["booking a flight", "library membership", "course registration", "renting an apartment", "planning a university event", "opening a bank account", "discussing a research project"]
-    topic = random.choice(topics)
-
+    topics = ["booking a flight", "library membership", "course registration", "renting an apartment", "planning a university event"]
     prompt = f"""
-    Write a short conversation between two people discussing {topic}.
-    Provide 3 multiple-choice questions about specific details mentioned in the conversation.
-    Output STRICTLY in JSON (no markdown):
-    {{
-        "script": "Person A: ... Person B: ...",
-        "questions": [
-            {{"q": "Question?", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "answer": "A"}},
-            {{"q": "Question?", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "answer": "B"}},
-            {{"q": "Question?", "options": ["A) ...", "B) ...", "C) ...", "D) ..."], "answer": "C"}}
-        ]
-    }}
+    Write a short conversation discussing {random.choice(topics)}.
+    Provide 3 multiple-choice questions. Output STRICTLY in JSON (no markdown):
+    {{"script": "...", "questions": [{{"q": "?", "options": ["A", "B", "C", "D"], "answer": "A"}}]}}
     """
     response = groq_client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": prompt}])
-    clean = response.choices[0].message.content.replace('```json','').replace('```','').strip()
-    return json.loads(clean)
+    return json.loads(response.choices[0].message.content.replace('```json','').replace('```','').strip())
 
 @app.post("/api/ielts/grade-writing")
 def ielts_writing(data: IELTSWritingRequest):
     prompt = f"""
-    Grade this IELTS Writing Task 2 essay on band scale 0-9.
-    Essay: "{data.essay_text}"
-    Output STRICTLY in JSON (no markdown):
-    {{"band": 6.5, "feedback": "...", "task_achievement": 6.5, "coherence": 7.0, "lexical_resource": 6.5, "grammar": 6.0}}
+    Grade this IELTS Writing Task 2 essay on band scale 0-9. Essay: "{data.essay_text}"
+    Output STRICTLY in JSON (no markdown): {{"band": 6.5, "feedback": "...", "task_achievement": 6.5, "coherence": 7.0, "lexical_resource": 6.5, "grammar": 6.0}}
     """
     response = groq_client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": prompt}])
-    clean = response.choices[0].message.content.replace('```json','').replace('```','').strip()
-    result = json.loads(clean)
+    result = json.loads(response.choices[0].message.content.replace('```json','').replace('```','').strip())
     IELTSPrep(data.user_id).save_result("Writing", result.get("band", 0), result.get("feedback", ""))
     return result
 
 @app.post("/api/ielts/grade-speaking")
 def ielts_speaking(data: IELTSSpeakingRequest):
     prompt = f"""
-    Grade this IELTS Speaking response on band scale 0-9.
-    Topic: "{data.topic}"
-    Response: "{data.response_text}"
-    Output STRICTLY in JSON (no markdown):
-    {{"band": 6.5, "feedback": "..."}}
+    Grade this IELTS Speaking response on band scale 0-9. Topic: "{data.topic}" Response: "{data.response_text}"
+    Output STRICTLY in JSON: {{"band": 6.5, "feedback": "..."}}
     """
     response = groq_client.chat.completions.create(model="llama-3.3-70b-versatile", messages=[{"role": "user", "content": prompt}])
-    clean = response.choices[0].message.content.replace('```json','').replace('```','').strip()
-    result = json.loads(clean)
+    result = json.loads(response.choices[0].message.content.replace('```json','').replace('```','').strip())
     IELTSPrep(data.user_id).save_result("Speaking", result.get("band", 0), result.get("feedback", ""))
     return result
 
@@ -322,7 +315,7 @@ def ielts_save(data: IELTSScoreRequest):
     IELTSPrep(data.user_id).save_result(data.module, data.score, data.feedback)
     return {"success": True}
 
-# --- CHAT & PROGRESS ---
+# --- CHATBOT & PROGRESS ---
 class ChatRequest(BaseModel):
     user_id: str
     message: str
@@ -360,10 +353,7 @@ def get_chat_history(user_id: str):
     try:
         _chat_order = getattr(ChatMessage, "timestamp", ChatMessage.id)
         messages = session.query(ChatMessage).filter_by(user_id=user_id).order_by(_chat_order.asc()).all()
-        def _fmt_ts(m):
-            ts = getattr(m, "timestamp", None)
-            return ts.strftime("%Y-%m-%d %H:%M") if ts else ""
-        return {"history": [{"role": m.role, "content": m.content, "timestamp": _fmt_ts(m)} for m in messages]}
+        return {"history": [{"role": m.role, "content": m.content, "timestamp": m.timestamp.strftime("%Y-%m-%d %H:%M") if m.timestamp else ""} for m in messages]}
     finally:
         session.close()
 
@@ -373,13 +363,11 @@ def get_progress(user_id: str):
     try:
         _ts_order = getattr(TestSession, "timestamp", TestSession.id)
         results = session.query(TestSession).filter_by(user_id=user_id).order_by(_ts_order.desc()).all()
-        def _fmt_date(r):
-            ts = getattr(r, "timestamp", None)
-            return ts.strftime("%Y-%m-%d") if ts else ""
-        return {"history": [{"test_type": r.test_type.value if r.test_type else "N/A", "module": r.module or "", "score": float(r.score_obtained) if r.score_obtained else 0, "feedback": r.feedback or "", "date": _fmt_date(r)} for r in results]}
+        return {"history": [{"test_type": r.test_type.value if r.test_type else "N/A", "module": r.module or "", "score": float(r.score_obtained) if r.score_obtained else 0, "feedback": r.feedback or "", "date": r.timestamp.strftime("%Y-%m-%d") if r.timestamp else ""} for r in results]}
     finally:
         session.close()
 
 if __name__ == "__main__":
     import uvicorn
+    # This lets you run the server locally simply by typing: python api.py (or python main.py)
     uvicorn.run("api:app", host="0.0.0.0", port=8000, reload=True)

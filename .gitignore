@@ -1,17 +1,26 @@
-# Python-generated files
+# --- Secrets ---
+.env
+.env.*
+!.env.example
+
+# --- Python ---
 __pycache__/
 *.py[oc]
-build/
-dist/
+*.egg-info/
+.venv/
+venv/
 wheels/
-*.egg-info
 
-# Virtual environments
-.venv
-.env
-/node_modules
-/dist
-/build
+# --- Build output ---
+dist/
+build/
+
+# --- Node (stray installs) ---
+node_modules/
 *.log
+
+# --- Editor / OS ---
 .DS_Store
-node_modules
+Thumbs.db
+.idea/
+.vscode/

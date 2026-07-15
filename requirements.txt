@@ -1,19 +1,21 @@
-# AI & API
-google-generativeai
+# --- Web framework ---
+fastapi
+uvicorn[standard]
 
-# Database
+# --- Database ---
 sqlalchemy
-psycopg2-binary  # For PostgreSQL
-# OR use 'sqlite' (built-in) if you switch back
+asyncpg
+psycopg2-binary
 
-# Data & ML
-pandas
-numpy
-scikit-learn
+# --- Auth ---
+bcrypt
+PyJWT
 
-# Audio Processing
-gTTS
-#pygame
-SpeechRecognition
-#pyaudio  # Required for microphone input
+# --- AI ---
+groq
+
+# --- Config ---
 python-dotenv
+
+# --- Data (used by import_universities.py) ---
+pandas

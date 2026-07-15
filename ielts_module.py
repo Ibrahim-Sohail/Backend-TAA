@@ -36,7 +36,7 @@ class IELTSPrep:
         topic = random.choice(topics)
 
         prompt = f"""
-        Generate a completely unique, short (150 words) IELTS Academic Reading passage about '{topic}'.
+        Generate a completely unique, short (100 words) IELTS Academic Reading passage about '{topic}'.
         Then provide 3 multiple-choice questions based on it.
         Output STRICTLY in JSON (no markdown):
         {{

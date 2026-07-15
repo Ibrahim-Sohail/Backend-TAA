@@ -1,6 +1,7 @@
 """
 councelling_module.py — AI University Recommender Engine (CSV Powered & Bulletproof)
 """
+import json
 import os
 import csv
 import random
@@ -103,7 +104,52 @@ def populate_dummy_data():
     finally:
         session.close()
 
+
+# ... (keep your existing populate_dummy_data function) ...
+
 class UniversityRecommender:
+    
+    # ... (keep your existing recommend function exactly as it is) ...
+
+    def recommend_from_ai(self, profile, groq_client):
+        """
+        Fetches Top 5 dynamic recommendations from Groq AI based on the user's profile.
+        """
+        prompt = f"""
+        You are an expert Study Abroad Consultant. Based on the following student profile, 
+        recommend the top 5 universities that are the best academic and financial fit.
+        
+        Student Profile:
+        - Major Interest: {profile.major_interest or 'General'}
+        - CGPA/GPA: {profile.cgpa or 'N/A'}
+        - Max Budget: ${profile.budget_max or 'N/A'} per year
+        - Preferred Country: {profile.preferred_country or 'Any'}
+
+        Output STRICTLY in JSON format (no markdown, no extra conversational text). 
+        Format your response exactly like this:
+        {{
+            "ai_recommendations": [
+                {{
+                    "name": "University Name",
+                    "location": "City, Country",
+                    "tuition": "Estimated Tuition",
+                    "reason": "1-sentence explanation of why it fits their CGPA/Budget"
+                }}
+            ]
+        }}
+        """
+        try:
+            response = groq_client.chat.completions.create(
+                model="llama-3.3-70b-versatile",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7 # Slight creativity for a wider variety of universities
+            )
+            # Clean and parse the strict JSON response
+            clean_json = response.choices[0].message.content.replace('```json', '').replace('```', '').strip()
+            return json.loads(clean_json).get("ai_recommendations", [])
+        except Exception as e:
+            print(f"❌ AI Recommendation Error: {e}")
+            return []
     def load_and_train(self):
         pass
 
