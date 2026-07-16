@@ -66,7 +66,32 @@ async def startup():
     else:
         print("✅ Universities already seeded — skipping CSV reload.")
 
+    ensure_guest_user()
     print("✅ API startup complete.")
+
+def ensure_guest_user():
+    # The frontend bypasses auth and hardcodes this guest id (see app.js).
+    # Profiles, test scores and chat rows all FK to users.id, so the guest
+    # must exist as a real row or those writes 500 on the constraint.
+    session = get_sync_session()
+    try:
+        if session.query(User).filter_by(id="guest_student_123").first():
+            return
+        pw = bcrypt.hashpw(os.urandom(16).hex().encode(), bcrypt.gensalt()).decode()
+        session.add(User(
+            id="guest_student_123",
+            username="Guest Explorer",
+            email="guest@theadmissionarchitect.com",
+            password_hash=pw,
+            is_active=True,
+        ))
+        session.commit()
+        print("✅ Guest user seeded.")
+    except Exception as e:
+        session.rollback()
+        print(f"⚠️ Could not seed guest user: {e}")
+    finally:
+        session.close()
 
 # --- AUTH ROUTES ---
 class SignupRequest(BaseModel):
